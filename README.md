@@ -21,7 +21,7 @@ in real payment systems:
 | Area | Tools |
 | --- | --- |
 | API | Python 3.12+, FastAPI, Pydantic v2 |
-| Database | PostgreSQL, SQLAlchemy 2.0 (async), asyncpg, Alembic *(Phase 2)* |
+| Database | PostgreSQL, SQLAlchemy 2.0 (async), asyncpg, Alembic |
 | Messaging & cache | Apache Kafka *(Phase 9)*, Redis *(Phase 10)* |
 | Auth | JWT *(Phase 3)* |
 | Quality | pytest, pytest-asyncio, httpx, Ruff, mypy (strict) |
@@ -32,8 +32,8 @@ in real payment systems:
 | # | Milestone | Status |
 | --- | --- | --- |
 | 1 | Project setup: FastAPI, config, logging, errors, Docker, CI | ✅ Done |
-| 2 | Database design: accounts, journals, postings, migrations | ⏳ Next |
-| 3 | Authentication: JWT, registration, access control | |
+| 2 | Database design: accounts, journals, postings, migrations | ✅ Done |
+| 3 | Authentication: JWT, registration, access control | ⏳ Next |
 | 4 | Account management | |
 | 5 | Double-entry ledger | |
 | 6 | Money transfers: atomic, insufficient-funds checks | |
@@ -52,7 +52,7 @@ Requires Docker with the Compose plugin.
 git clone https://github.com/vishant0815/finledger-banking-api.git
 cd finledger-banking-api
 cp .env.example .env          # then set POSTGRES_PASSWORD
-docker compose up --build
+docker compose up --build      # starts PostgreSQL, applies migrations, then starts the API
 ```
 
 | URL | What |
@@ -70,6 +70,7 @@ one is to start only the database container.
 uv sync                                   # create .venv and install locked dependencies
 cp .env.example .env                      # then set POSTGRES_PASSWORD
 docker compose up -d db                   # PostgreSQL on localhost:5432
+uv run alembic upgrade head               # apply database migrations
 uv run uvicorn app.main:create_app --factory --reload
 ```
 
@@ -81,10 +82,85 @@ These run in CI on every push and pull request.
 uv run ruff check .            # lint
 uv run ruff format --check .   # formatting
 uv run mypy                    # strict type checking
-uv run pytest --cov            # tests + coverage
+uv run pytest --cov            # unit + PostgreSQL integration tests
+uv run pytest -m "not integration"   # unit tests only, no database needed
 ```
 
-The test suite needs **no** running PostgreSQL, Kafka or Redis.
+Integration tests create a throwaway `finledger_test` database, migrate it with Alembic and
+run against the real schema. Locally they are skipped if PostgreSQL isn't running; in CI they
+run against a PostgreSQL service container and can never be skipped. No Kafka or Redis needed.
+
+### Migrations
+
+```bash
+uv run alembic revision --autogenerate -m "describe change"   # after changing models
+uv run alembic upgrade head                                   # apply
+uv run alembic downgrade -1                                   # roll back one step
+```
+
+A test fails if the models and migrations ever drift apart, and another runs a full
+downgrade-then-upgrade round trip.
+
+## Ledger data model
+
+```mermaid
+erDiagram
+    accounts ||--o{ postings : "is credited/debited by"
+    journal_entries ||--|{ postings : "has 2+ legs"
+
+    accounts {
+        uuid id PK
+        varchar name
+        varchar type "customer | system"
+        varchar status "active | frozen | closed"
+        char3 currency "ISO 4217"
+        numeric balance "maintained by trigger"
+    }
+    journal_entries {
+        uuid id PK
+        varchar entry_type "deposit | withdrawal | transfer | reversal"
+        char3 currency
+        varchar description
+        timestamptz created_at
+    }
+    postings {
+        uuid id PK
+        uuid journal_entry_id FK
+        uuid account_id FK
+        char3 currency
+        numeric amount "signed, never zero"
+        timestamptz created_at
+    }
+```
+
+A **journal entry** is one financial event, for example "Alice pays Bob £30". Each **posting**
+is one leg of it against one account. Amounts are signed (positive increases a balance), and
+every entry's postings sum to zero, so money is only ever moved, never created. Deposits and
+withdrawals balance against a `system` settlement account.
+
+| Transfer £30 from Alice to Bob | account | amount |
+| --- | --- | --- |
+| posting 1 | Alice | −30.00 |
+| posting 2 | Bob | +30.00 |
+| **sum** | | **0.00** |
+
+### Rules enforced by PostgreSQL itself
+
+These hold even if application code has a bug. Each one has an integration test that bypasses
+the application and tries to break it.
+
+| Rule | How |
+| --- | --- |
+| Every entry balances (≥ 2 postings, sum = 0) | Deferred constraint triggers, checked at `COMMIT` |
+| Ledger is append-only | Triggers reject `UPDATE`/`DELETE` on entries and postings; fix mistakes with a reversal |
+| Balances can't drift from the ledger | Trigger applies each posting to `accounts.balance`; direct balance writes are rejected |
+| Customer accounts can't go negative | `CHECK (type = 'system' OR balance >= 0)` on the running balance |
+| No cross-currency postings | Composite foreign keys: posting currency = account currency = entry currency |
+| Money is exact | `NUMERIC(19,4)` end-to-end with Python `Decimal`; floats are never used |
+| Concurrent postings to one account serialise | The balance trigger's `UPDATE` takes a row lock; the CHECK sees the latest balance |
+
+Violations surface as named constraints (`journal_entry_balanced`, `ledger_append_only`,
+`balance_managed_by_ledger`, …), so the API layer can map them to precise error responses.
 
 ## API
 
@@ -152,11 +228,15 @@ app/
 │   ├── middleware.py       # request IDs + structured access log
 │   └── exceptions.py       # domain errors + centralised handlers
 ├── db/
+│   ├── base.py             # declarative base, naming conventions, money type
 │   └── session.py          # async engine, session factory, DB ping
+├── models/                 # SQLAlchemy models: Account, JournalEntry, Posting
 └── schemas/                # Pydantic response models
+migrations/                 # Alembic (async); versions/ holds schema + ledger triggers
 tests/
 ├── api/                    # HTTP-level tests
-└── unit/                   # config and DB helper tests
+├── unit/                   # config and DB helper tests
+└── integration/            # real PostgreSQL: ledger rules + migration checks
 ```
 
 ## Design notes
