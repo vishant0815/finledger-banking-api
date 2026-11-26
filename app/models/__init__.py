@@ -2,6 +2,7 @@
 
 from app.models.account import Account, AccountStatus, AccountType
 from app.models.ledger import JournalEntry, JournalEntryType, Posting
+from app.models.user import User, UserRole
 
 __all__ = [
     "Account",
@@ -10,4 +11,6 @@ __all__ = [
     "JournalEntry",
     "JournalEntryType",
     "Posting",
+    "User",
+    "UserRole",
 ]
