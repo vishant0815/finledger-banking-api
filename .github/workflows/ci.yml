@@ -16,6 +16,26 @@ jobs:
   quality:
     name: Lint, type-check & test
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: finledger
+          POSTGRES_PASSWORD: finledger-ci
+          POSTGRES_DB: finledger
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U finledger -d finledger"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: finledger
+      POSTGRES_PASSWORD: finledger-ci
+      POSTGRES_DB: finledger
     steps:
       - uses: actions/checkout@v7
 
@@ -36,7 +56,10 @@ jobs:
       - name: Mypy
         run: uv run mypy
 
-      - name: Pytest
+      - name: Apply migrations to a clean database
+        run: uv run alembic upgrade head
+
+      - name: Pytest (unit + PostgreSQL integration)
         run: uv run pytest --cov --cov-report=term-missing
 
   docker:
