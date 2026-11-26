@@ -36,6 +36,7 @@ jobs:
       POSTGRES_USER: finledger
       POSTGRES_PASSWORD: finledger-ci
       POSTGRES_DB: finledger
+      JWT_SECRET_KEY: ci-only-signing-key-not-used-anywhere-else
     steps:
       - uses: actions/checkout@v7
 
