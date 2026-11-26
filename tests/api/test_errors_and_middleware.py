@@ -71,6 +71,34 @@ async def test_method_not_allowed_uses_error_envelope(client: AsyncClient) -> No
     assert response.json()["error"]["code"] == "method_not_allowed"
 
 
+async def test_app_error_status_is_a_plain_int(app_with_test_routes: FastAPI) -> None:
+    sent: list[object] = []
+
+    async def receive() -> dict[str, object]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: dict[str, object]) -> None:
+        if message["type"] == "http.response.start":
+            sent.append(message["status"])
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/_test/conflict",
+        "headers": [],
+        "query_string": b"",
+        "http_version": "1.1",
+        "scheme": "http",
+        "server": ("test", 80),
+        "client": ("test", 1),
+        "root_path": "",
+    }
+    await app_with_test_routes(scope, receive, send)  # type: ignore[arg-type]
+
+    assert sent == [409]
+    assert type(sent[0]) is int
+
+
 async def test_app_error_is_mapped_to_its_status_and_code(test_client: AsyncClient) -> None:
     response = await test_client.get("/_test/conflict")
 

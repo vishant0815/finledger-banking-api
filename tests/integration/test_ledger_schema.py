@@ -11,14 +11,9 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.db.errors import violated_constraint
 from app.models import Account, AccountStatus, AccountType, JournalEntry, JournalEntryType, Posting
-from tests.integration.factories import (
-    balance_of,
-    journal_entry,
-    open_account,
-    post,
-    violated_constraint,
-)
+from tests.integration.factories import balance_of, journal_entry, open_account, post
 
 pytestmark = pytest.mark.integration
 
