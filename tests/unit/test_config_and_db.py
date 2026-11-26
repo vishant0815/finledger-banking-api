@@ -68,6 +68,7 @@ async def test_ping_database_false_when_query_fails(error: Exception) -> None:
 def test_settings_reads_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("POSTGRES_PASSWORD", "from-env")
     monkeypatch.setenv("POSTGRES_HOST", "db")
+    monkeypatch.setenv("JWT_SECRET_KEY", "k" * 32)
 
     settings = Settings(_env_file=None)
 

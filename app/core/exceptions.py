@@ -9,7 +9,7 @@ Unexpected exceptions are logged with a traceback but never leak internals to cl
 
 from collections.abc import Mapping
 from http import HTTPStatus
-from typing import Any
+from typing import Any, ClassVar
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -29,11 +29,25 @@ class AppError(Exception):
     status_code: int = HTTPStatus.INTERNAL_SERVER_ERROR
     code: str = "internal_error"
     message: str = "An unexpected error occurred."
+    headers: ClassVar[Mapping[str, str] | None] = None
 
     def __init__(self, message: str | None = None, *, details: Any = None) -> None:
         self.message = message or self.message
         self.details = details
         super().__init__(self.message)
+
+
+class AuthenticationError(AppError):
+    status_code = HTTPStatus.UNAUTHORIZED
+    code = "not_authenticated"
+    message = "Authentication is required."
+    headers: ClassVar[Mapping[str, str] | None] = {"WWW-Authenticate": "Bearer"}
+
+
+class PermissionDeniedError(AppError):
+    status_code = HTTPStatus.FORBIDDEN
+    code = "forbidden"
+    message = "You do not have permission to perform this action."
 
 
 class NotFoundError(AppError):
@@ -80,7 +94,7 @@ def _error_response(
     if request_id:
         response_headers[REQUEST_ID_HEADER] = request_id
     return JSONResponse(
-        status_code=status_code,
+        status_code=int(status_code),  # plain int, not HTTPStatus, in responses and logs
         content=body.model_dump(mode="json", exclude_none=True),
         headers=response_headers,
     )
@@ -95,6 +109,7 @@ async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
         code=exc.code,
         message=exc.message,
         details=exc.details,
+        headers=exc.headers,
     )
 
 
