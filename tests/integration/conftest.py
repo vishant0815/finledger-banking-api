@@ -18,7 +18,9 @@ import asyncpg
 import pytest
 from alembic import command
 from alembic.config import Config
-from pydantic import ValidationError
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
+from pydantic import SecretStr, ValidationError
 from sqlalchemy import NullPool, text
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import (
@@ -29,8 +31,9 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.core.config import Settings
+from app.main import create_app
 
-LEDGER_TABLES = "postings, journal_entries, accounts"
+ALL_TABLES = "postings, journal_entries, accounts, users"
 
 
 def run_in_thread[T](fn: Callable[..., T], *args: Any) -> T:
@@ -70,12 +73,21 @@ def _unavailable(reason: str) -> NoReturn:
 
 
 @pytest.fixture(scope="session")
-def admin_url() -> URL:
+def base_settings() -> Settings:
+    """Database connection details from the environment / .env; test-only JWT key."""
     try:
-        settings = Settings()
+        return Settings(
+            environment="test",
+            log_level="WARNING",
+            jwt_secret_key=SecretStr("integration-test-signing-key-0123456789"),
+        )
     except ValidationError as exc:
         _unavailable(f"settings incomplete: {exc.errors()[0]['loc']}")
-    return settings.database_url
+
+
+@pytest.fixture(scope="session")
+def admin_url(base_settings: Settings) -> URL:
+    return base_settings.database_url
 
 
 @pytest.fixture(scope="session")
@@ -111,7 +123,7 @@ async def db_engine(migrated_db_url: URL) -> AsyncIterator[AsyncEngine]:
     yield engine
     # TRUNCATE bypasses the row-level append-only triggers; tests only.
     async with engine.begin() as conn:
-        await conn.execute(text(f"TRUNCATE {LEDGER_TABLES} CASCADE"))
+        await conn.execute(text(f"TRUNCATE {ALL_TABLES} CASCADE"))
     await engine.dispose()
 
 
@@ -126,3 +138,24 @@ async def session(
 ) -> AsyncIterator[AsyncSession]:
     async with session_factory() as db_session:
         yield db_session
+
+
+@pytest.fixture
+def api_settings(base_settings: Settings, migrated_db_url: URL) -> Settings:
+    return base_settings.model_copy(update={"postgres_db": migrated_db_url.database})
+
+
+@pytest.fixture
+def api_app(api_settings: Settings, db_engine: AsyncEngine) -> FastAPI:
+    # Depends on db_engine so tables are truncated after the app shuts down.
+    return create_app(api_settings)
+
+
+@pytest.fixture
+async def api_client(api_app: FastAPI) -> AsyncIterator[AsyncClient]:
+    """HTTP client for the full app wired to the migrated test database."""
+    async with (
+        api_app.router.lifespan_context(api_app),
+        AsyncClient(transport=ASGITransport(app=api_app), base_url="http://test") as client,
+    ):
+        yield client

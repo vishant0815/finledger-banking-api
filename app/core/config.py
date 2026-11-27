@@ -46,6 +46,15 @@ class Settings(BaseSettings):
     db_pool_timeout_seconds: int = Field(default=30, ge=1)
     db_echo: bool = False
 
+    # --- Authentication (JWT) ---
+    # Required, >= 32 chars. Generate one with:
+    #   python -c "import secrets; print(secrets.token_urlsafe(48))"
+    jwt_secret_key: SecretStr = Field(min_length=32)
+    jwt_algorithm: Literal["HS256", "HS384", "HS512"] = "HS256"
+    jwt_issuer: str = "finledger-api"
+    jwt_audience: str = "finledger-clients"
+    access_token_expire_minutes: int = Field(default=15, ge=1, le=1440)
+
     @property
     def database_url(self) -> URL:
         """Async SQLAlchemy URL. `URL` masks the password when printed or logged."""

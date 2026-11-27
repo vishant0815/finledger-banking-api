@@ -54,14 +54,3 @@ async def balance_of(session_factory: SessionFactory, account: Account) -> Decim
         balance = await session.scalar(select(Account.balance).where(Account.id == account.id))
         assert balance is not None
         return balance
-
-
-def violated_constraint(exc: BaseException) -> str | None:
-    """Walk SQLAlchemy -> DBAPI adapter -> asyncpg exceptions to find the constraint name."""
-    current: BaseException | None = exc
-    while current is not None:
-        name = getattr(current, "constraint_name", None)
-        if name:
-            return str(name)
-        current = getattr(current, "orig", None) or current.__cause__
-    return None

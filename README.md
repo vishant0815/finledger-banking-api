@@ -23,7 +23,7 @@ in real payment systems:
 | API | Python 3.12+, FastAPI, Pydantic v2 |
 | Database | PostgreSQL, SQLAlchemy 2.0 (async), asyncpg, Alembic |
 | Messaging & cache | Apache Kafka *(Phase 9)*, Redis *(Phase 10)* |
-| Auth | JWT *(Phase 3)* |
+| Auth | JWT (PyJWT), Argon2id password hashing, OAuth2 password flow |
 | Quality | pytest, pytest-asyncio, httpx, Ruff, mypy (strict) |
 | Delivery | Docker, Docker Compose, GitHub Actions |
 
@@ -33,8 +33,8 @@ in real payment systems:
 | --- | --- | --- |
 | 1 | Project setup: FastAPI, config, logging, errors, Docker, CI | ✅ Done |
 | 2 | Database design: accounts, journals, postings, migrations | ✅ Done |
-| 3 | Authentication: JWT, registration, access control | ⏳ Next |
-| 4 | Account management | |
+| 3 | Authentication: JWT, registration, access control | ✅ Done |
+| 4 | Account management | ⏳ Next |
 | 5 | Double-entry ledger | |
 | 6 | Money transfers: atomic, insufficient-funds checks | |
 | 7 | Idempotency keys | |
@@ -51,7 +51,7 @@ Requires Docker with the Compose plugin.
 ```bash
 git clone https://github.com/vishant0815/finledger-banking-api.git
 cd finledger-banking-api
-cp .env.example .env          # then set POSTGRES_PASSWORD
+cp .env.example .env          # then set POSTGRES_PASSWORD and JWT_SECRET_KEY
 docker compose up --build      # starts PostgreSQL, applies migrations, then starts the API
 ```
 
@@ -68,7 +68,7 @@ one is to start only the database container.
 
 ```bash
 uv sync                                   # create .venv and install locked dependencies
-cp .env.example .env                      # then set POSTGRES_PASSWORD
+cp .env.example .env                      # then set POSTGRES_PASSWORD and JWT_SECRET_KEY
 docker compose up -d db                   # PostgreSQL on localhost:5432
 uv run alembic upgrade head               # apply database migrations
 uv run uvicorn app.main:create_app --factory --reload
@@ -166,10 +166,14 @@ Violations surface as named constraints (`journal_entry_balanced`, `ledger_appen
 
 All endpoints are versioned under `/api/v1`.
 
-| Method | Path | Description |
-| --- | --- | --- |
-| `GET` | `/api/v1/health` | Liveness: the process is up (no external calls) |
-| `GET` | `/api/v1/health/ready` | Readiness: `200` if PostgreSQL responds, otherwise `503` |
+| Method | Path | Auth | Description |
+| --- | --- | --- | --- |
+| `GET` | `/api/v1/health` | none | Liveness: the process is up (no external calls) |
+| `GET` | `/api/v1/health/ready` | none | Readiness: `200` if PostgreSQL responds, otherwise `503` |
+| `POST` | `/api/v1/auth/register` | none | Create a customer account |
+| `POST` | `/api/v1/auth/login` | none | OAuth2 password flow → JWT access token |
+| `GET` | `/api/v1/users/me` | bearer | The logged-in user |
+| `GET` | `/api/v1/users` | admin | List users (`limit`, `offset`) |
 
 Example:
 
@@ -196,6 +200,43 @@ Every error uses one envelope, and every response carries an `X-Request-ID` head
 }
 ```
 
+## Authentication
+
+```bash
+# Register (passwords: 12–128 characters)
+curl -X POST localhost:8000/api/v1/auth/register -H 'content-type: application/json' \
+  -d '{"email": "alice@example.com", "password": "correct-horse-battery", "full_name": "Alice"}'
+
+# Log in: OAuth2 form fields, so Swagger's "Authorize" button works too
+curl -X POST localhost:8000/api/v1/auth/login \
+  -d 'username=alice@example.com&password=correct-horse-battery'
+# {"access_token": "eyJ...", "token_type": "bearer", "expires_in": 900}
+
+curl localhost:8000/api/v1/users/me -H "Authorization: Bearer eyJ..."
+```
+
+Create the first admin (the password is prompted for, never passed as an argument):
+
+```bash
+uv run python -m app.cli create-admin --email admin@example.com --name "Ops Admin"
+docker compose run --rm api python -m app.cli create-admin --email admin@example.com --name "Ops Admin"
+```
+
+Security decisions:
+
+- **Argon2id** password hashing (RFC 9106 parameters), run in a worker thread so the slow
+  hash never blocks the async event loop. Hashes are upgraded on login if parameters change.
+- **Short-lived JWTs** (15 min) signed with HS256. The algorithm is pinned, so `alg: none`
+  and algorithm-swap attacks fail. Issuer, audience, expiry and a unique `jti` are required.
+- **No user enumeration:** a wrong password and an unknown email return the same 401, and
+  take the same time (a dummy hash is verified when the email doesn't exist).
+- **Live permissions:** the user is reloaded on every request, so deactivating an account or
+  changing a role takes effect immediately, not when the token expires.
+- **Race-safe sign-up:** a unique constraint on the (lowercased) email decides concurrent
+  registrations; a test fires 5 at once and asserts exactly one account is created.
+- Passwords are `SecretStr` end to end and never logged or echoed in validation errors.
+- **Planned:** login rate limiting (Phase 10, Redis) and refresh tokens.
+
 ## Configuration
 
 Settings are read from environment variables (or `.env`) via `pydantic-settings`.
@@ -210,33 +251,41 @@ See [`.env.example`](.env.example).
 | `POSTGRES_USER` / `POSTGRES_DB` | `finledger` | |
 | `POSTGRES_PASSWORD` | *(required)* | No default. The app refuses to start without it. |
 | `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` | `5` / `10` | SQLAlchemy connection pool |
+| `JWT_SECRET_KEY` | *(required)* | ≥ 32 characters. The app refuses to start without it. |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | `15` | Access token lifetime |
 
 ## Project structure
 
 ```
 app/
 ├── main.py                 # application factory + lifespan (DB engine setup/teardown)
+├── cli.py                  # operational commands (create-admin)
 ├── api/
-│   ├── deps.py             # shared dependencies (settings, DB session)
+│   ├── deps.py             # dependencies: settings, DB session, current user, roles
 │   └── v1/
 │       ├── router.py       # /api/v1 router
 │       └── endpoints/
+│           ├── auth.py     # register, login
+│           ├── users.py    # /users/me, admin user list
 │           └── health.py   # liveness & readiness
 ├── core/
 │   ├── config.py           # pydantic-settings configuration
 │   ├── logging.py          # structlog setup (console locally, JSON in prod)
 │   ├── middleware.py       # request IDs + structured access log
+│   ├── security.py         # Argon2id hashing, JWT create/verify
 │   └── exceptions.py       # domain errors + centralised handlers
 ├── db/
 │   ├── base.py             # declarative base, naming conventions, money type
 │   └── session.py          # async engine, session factory, DB ping
-├── models/                 # SQLAlchemy models: Account, JournalEntry, Posting
-└── schemas/                # Pydantic response models
+├── models/                 # SQLAlchemy models: User, Account, JournalEntry, Posting
+├── repositories/           # data access (queries only, no business rules)
+├── services/               # business logic (auth; ledger next)
+└── schemas/                # Pydantic request/response models
 migrations/                 # Alembic (async); versions/ holds schema + ledger triggers
 tests/
 ├── api/                    # HTTP-level tests
 ├── unit/                   # config and DB helper tests
-└── integration/            # real PostgreSQL: ledger rules + migration checks
+└── integration/            # real PostgreSQL: ledger rules, auth API, CLI, migrations
 ```
 
 ## Design notes

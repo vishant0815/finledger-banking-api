@@ -22,6 +22,7 @@ def settings() -> Settings:
         environment="test",
         log_level="WARNING",
         postgres_password=SecretStr("test-password"),
+        jwt_secret_key=SecretStr("unit-test-signing-key-0123456789abcdef"),
     )
 
 
